@@ -1,0 +1,105 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Buoyancy
+
+//Params to evaluate buoyancy
+cbuffer CB
+{
+    float sizeN;
+    float displacementStrengthY;
+    float displacementStrengthXZ;
+    float scaleFFT;
+    float waterInitialHeight;
+};
+
+//Used to read FFT data
+Texture2D<float4> _Displacement;
+SamplerState sampler_Displacement;
+
+struct TestPoint
+{
+    float3 pos;
+    float3 normal;
+};
+
+//Write results in here
+RWStructuredBuffer<TestPoint> Results;
+
+//-------------------------
+//The compute shader itself
+[numthreads(16, 1, 1)]
+void Buoyancy(uint3 id : SV_DispatchThreadID)
+{
+    //------------------------
+    //Initialise and read data
+    TestPoint temp = Results[id.x];
+    const float2 uv = temp.pos.xz / sizeN * scaleFFT;
+    float3 point1 = 0.0f;
+    float3 point2 = 0.0f;
+    float3 tempPos = temp.pos;
+    
+    //----------------------------
+    //Obtain first temporary point
+    {
+        tempPos.y = waterInitialHeight;
+        
+        float3 displacement = _Displacement.SampleLevel(sampler_Displacement, uv, 0.0f).xyz;
+        displacement.xz *= displacementStrengthXZ;
+        displacement.y *= displacementStrengthY;
+        
+        //There is no real tangible data in the displacement map -> stop
+        if (length(displacement.xyz) < 0.00001f)
+        {
+            temp.pos = tempPos;
+            temp.normal = float3(0.0f, 1.0f, 0.0f);
+            Results[id.x] = temp;
+            return;
+        }
+        
+        point1 = tempPos + displacement;
+        
+        //Move towards second point
+        tempPos -= displacement;
+    }
+    
+    //-----------------------------
+    //Obtain second temporary point
+    {
+        tempPos.y = waterInitialHeight;
+        
+        float3 displacement = _Displacement.SampleLevel(sampler_Displacement, uv, 0.0f).xyz;
+        displacement.xz *= displacementStrengthXZ;
+        displacement.y *= displacementStrengthY;
+        
+        point2 = tempPos + displacement;
+    }
+    
+    //---------------------
+    //Third temporary point
+    {
+        //Obtain final position by projecting object position
+        //onto the vector between the two positions
+        const float3 from1To2 = normalize(point2 - point1);
+        temp.pos = dot((Results[id.x].pos - point1), from1To2) * from1To2 + point1;
+        
+        //If underwater
+        if(Results[id.x].pos.y < temp.pos.y)
+        {
+            //------------------------------
+            //Obtain normal from final point
+            const float mult = displacementStrengthY;
+            const float3 offset = float3(1.0f / sizeN, 1.0f / sizeN, 0.0f);
+
+            const float3 left = float3(-1.0f, _Displacement.SampleLevel(sampler_Displacement, uv - offset.xz, 0.0f).y * mult, 0.0f);
+            const float3 right = float3(1.0f, _Displacement.SampleLevel(sampler_Displacement, uv + offset.xz, 0.0f).y * mult, 0.0f);
+            const float3 top = float3(0.0f, _Displacement.SampleLevel(sampler_Displacement, uv - offset.zy, 0.0f).y * mult, -1.0f);
+            const float3 bottom = float3(0.0f, _Displacement.SampleLevel(sampler_Displacement, uv + offset.zy, 0.0f).y * mult, 1.0f);
+
+            const float3 tangentWS = normalize(bottom - top);
+            const float3 binormalWS = normalize(right - left);
+            temp.normal = normalize(cross(tangentWS, binormalWS));
+        }
+    }
+    
+    //Finished
+    Results[id.x] = temp;
+}

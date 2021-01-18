@@ -1,0 +1,105 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel IFFT
+
+cbuffer CB
+{
+    uint stageFFT;
+    float resolution_N;
+    bool isPingPong;
+    bool isHorizontal;
+    bool isPermutation;
+};
+
+//Used in the pingpong process
+RWTexture2D<float4> Texture0;
+RWTexture2D<float4> Texture1;
+RWTexture2D<float4> Displacement;
+
+Texture2D<float4> Butterfly;
+
+//---------------------------------------
+//Helper functions for complex operations
+
+//https://www.mathsisfun.com/numbers/complex-numbers.html
+float2 compConj(const float2 a)
+{
+    return float2(a.x, -a.y);
+}
+
+//https://www.mathsisfun.com/numbers/complex-numbers.html
+float2 compMul(const float2 a, const float2 b)
+{
+    return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+//https://www.expii.com/t/exponential-form-of-a-complex-number-9210
+float2 compExp(const float a)
+{
+    return float2(cos(a), sin(a));
+}
+
+//-------------------------
+//The compute shader itself
+[numthreads(16,16,1)]
+void IFFT(uint3 id : SV_DispatchThreadID)
+{
+    //Initialise
+    const uint2 index = id.xy;
+    
+    //IFFT
+    if (!isPermutation)
+    {
+        //Sample from butterfly texture
+        const float4 butterflyData = Butterfly[uint2(stageFFT, ((isHorizontal) ? index.x : index.y))];
+    
+        //Obtain indices
+        const float2 indexP = (isHorizontal ? uint2(butterflyData.z, index.y) : uint2(index.x, butterflyData.z));
+        const float2 indexQ = (isHorizontal ? uint2(butterflyData.w, index.y) : uint2(index.x, butterflyData.w));
+        
+        //Common data
+        const float2 W = butterflyData.xy;
+    
+        //Sample from corresponding texture
+        if (isPingPong)
+        {
+            const float2 P = Texture1[indexP].xy;
+            const float2 Q = Texture1[indexQ].xy;
+    
+            //Compute
+            Texture0[index] = float4(P + compMul(W, Q), 0.0f, 1.0f);
+        }
+        else
+        {
+            const float2 P = Texture0[indexP].xy;
+            const float2 Q = Texture0[indexQ].xy;
+    
+            //Compute
+            Texture1[index] = float4(P + compMul(W, Q), 0.0f, 1.0f);
+        }
+    }
+    
+    //Otherwise, perform permutation
+    //Permutation is the final final "correction" stage
+    else
+    {
+        //What way should we permute?
+        const float permutation = ( ( (index.x + index.y) % 2) % 2 == 0) ? 1.0f : -1.0f;
+        const float NtimesN = pow(resolution_N, 2.0f);
+
+        //Depending on ping pong stage, different operation
+        if(isPingPong)
+        {
+            const float h = Texture0[index].r;
+            const float permResult = permutation * (h / NtimesN);
+            
+            Displacement[index] = float4(permResult, permResult, permResult, 1.0f);
+        }
+        else
+        {
+            const float h = Texture1[index].r;
+            const float permResult = permutation * (h / NtimesN);
+            
+            Displacement[index] = float4(permResult, permResult, permResult, 1.0f);
+        }
+    }
+}
